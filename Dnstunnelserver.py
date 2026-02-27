@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -168,15 +168,22 @@ class TunnelSession:
 # Tunnel Decoder  (mirrors encoding in client)
 # ---------------------------------------------------------------------------
 def decode_label_data(encoded: str) -> bytes:
-    """Decode hex-encoded data from a DNS label."""
+    """Decode hex-encoded data from DNS labels.
+
+    The selector path splits hex data across multiple labels separated by
+    dots (e.g. 'aabb.ccdd.eeff').  Strip dots before decoding so
+    bytes.fromhex() receives a clean hex string.
+    """
+    # Remove dot separators inserted between labels
+    clean = encoded.replace(".", "")
     try:
-        return bytes.fromhex(encoded)
+        return bytes.fromhex(clean)
     except ValueError:
         pass
     try:
         # Pad base32 if needed
-        padding = (8 - len(encoded) % 8) % 8
-        return base64.b32decode(encoded.upper() + "=" * padding)
+        padding = (8 - len(clean) % 8) % 8
+        return base64.b32decode(clean.upper() + "=" * padding)
     except Exception:
         pass
     return encoded.encode()
@@ -369,7 +376,7 @@ class DNSTunnelServer:
             "chunks": len(session.chunks),
             "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         }
         with open(os.path.join(session_dir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
@@ -382,10 +389,26 @@ class DNSTunnelServer:
     # Response builders
     # ------------------------------------------------------------------
     def _txt_response(self, txid: int, qname: str, txt: str) -> bytes:
-        flags = 0x8180   # QR=1 AA=1 RD=1 RA=1
-        header = build_dns_response_header(txid, flags, 1, 1, 0, 0)
+        """Build a DNS TXT response.
+
+        Uses a compression pointer (0xC00C) in the answer name field so the
+        full FQDN is not repeated.  This keeps the UDP datagram well under
+        the 512-byte baseline limit even for long tunnel FQDNs.
+        """
+        flags    = 0x8180   # QR=1 AA=1 RD=1 RA=1
+        rdata    = txt.encode("ascii")
+        # TXT RDATA wire format: <1-byte length> <string>
+        rdata_wire = bytes([len(rdata)]) + rdata
+
+        header   = build_dns_response_header(txid, flags, 1, 1, 0, 0)
         question = encode_dns_name(qname) + struct.pack("!HH", DNS_TYPE_TXT, DNS_CLASS_IN)
-        answer = build_txt_record(qname, txt, ttl=0)
+        # Answer: compression pointer back to offset 12 (start of QNAME in question)
+        answer = (
+            b"\xc0\x0c"                                         # name: pointer → offset 12
+            + struct.pack("!HHIH", DNS_TYPE_TXT, DNS_CLASS_IN,  # type, class
+                          0, len(rdata_wire))                   # ttl=0, rdlength
+            + rdata_wire
+        )
         return header + question + answer
 
     def _nxdomain(self, txid: int, qname: str, qtype: int) -> bytes:
